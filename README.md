@@ -8,7 +8,8 @@ pipeline:
   
   
 Reference:
-  esp-adf:
+esp-adf:
       https://github.com/espressif/esp-adf.git
-  esp-dsp:
+     
+esp-dsp:
       https://github.com/espressif/esp-dsp.git
