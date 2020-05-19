@@ -13,16 +13,12 @@
 #include "dsps_wind_hann.h"
 
 static const char *TAG = "FFT_MUSIC";
-#define N_SAMPLES 512
 
-//存放复数，实数放在奇数位，虚数放在偶数位
+#define N_SAMPLES 2048
+//input audio raw data
 float y_cf[N_SAMPLES * 2];
-// Pointers to result arrays
-float *y1_cf = &y_cf[0];
-float *y2_cf = &y_cf[N_SAMPLES];
+//output fft data
 float sum_y[N_SAMPLES / 2];
-float sum_pick_y[N_SAMPLES / 2];
-float wind[N_SAMPLES];
 
 //Led relate
 periph_ws2812_ctrl_cfg_t *control_cfg = NULL;
@@ -34,9 +30,9 @@ esp_periph_handle_t handle_matrix = NULL;
 #define LED_HIGH_LEVEL 16
 #define LED_NUM (LED_HIGH_LEVEL * 8)
 
-//N_SAMPLE/2 is only half sum_y is valid
-//period is 44K, so fft is 0-20K, we only display 0-3.4K, so top freq is 3.4K
-#define LED_OFFSET ((N_SAMPLES / 2) / (LED_HIGH_LEVEL * 3))
+//display freq index: 31.5, 45, 63, 90, 125, 180, 250, 360, 550, 680, 890, 1k, 2k, 4k, 8k, 16k
+int16_t freq_offset[16] = {1, 2, 3, 4, 5, 8, 11, 17, 25, 30, 41, 44, 87, 175, 711, 0};
+
 unsigned char led_data[LED_HIGH_LEVEL];
 
 //for view test result
@@ -46,11 +42,14 @@ float led_data_view[LED_HIGH_LEVEL];
 unsigned char led_updateCount[LED_HIGH_LEVEL];
 #define SLOW_SPEED (2)
 
-#define FFT_TASK_PEROID (10)  //10Ms
-#define LED_UPDATE_PERIOD (5) //10Ms * LED_UPDATE_PERIOD
+//Task period
+#define FFT_TASK_DELAY (10) //Ms
+
+//display review period: FFT_TASK_DELAY * LED_UPDATE_PERIOD
+#define LED_UPDATE_PERIOD (3) //Ms
 
 #define THREAD_HIGH (0.1f)
-#define THREAD_LOW (0.01f)
+#define THREAD_LOW (0.005f)
 
 SemaphoreHandle_t xSemaphore = NULL;
 int haveDataUpdated = 0;
@@ -68,7 +67,7 @@ static void fft_update_led(unsigned char display[], int size)
         //for update right matrix
         for (int i = 0; i < LED_NUM; i++)
         {
-            control_cfg[i].color = (display[i / 8] >= ((i % 8) * 32)) ? LED2812_COLOR_CYAN : LED2812_COLOR_BLACK;
+            control_cfg[i].color = (display[i / 8] > ((i % 8) * 32)) ? LED2812_COLOR_CYAN : LED2812_COLOR_BLACK;
             control_cfg[i].mode = PERIPH_WS2812_ONE;
             control_cfg[i].loop = 50;
             control_cfg[i].time_off_ms = 100;
@@ -88,13 +87,10 @@ static void fft_update_data(void)
 
     for (i = 0; i < LED_HIGH_LEVEL; i++)
     {
-        tempraw = 0.0f;
-        for (int j = 0; j < LED_OFFSET; j++)
+        tempraw = sum_y[freq_offset[i]];
+        if (freq_offset[i] == 0)
         {
-            if (sum_y[i * LED_OFFSET + j + 1] > tempraw)
-            {
-                tempraw = sum_y[i * LED_OFFSET + j + 1];
-            }
+            tempraw /= 2.0f;
         }
 
         if (tempraw < THREAD_LOW)
@@ -126,9 +122,9 @@ static void fft_update_data(void)
         }
     }
 
+#if 1 //send to ws2812 matrix for display
     fft_update_led(led_data, LED_HIGH_LEVEL);
-
-#if 0   //for test use disp_view
+#else //for test use disp_view
     for (i = 0; i < LED_HIGH_LEVEL; i++)
     {
         led_data_view[i] = (float)led_data[i];
@@ -144,16 +140,16 @@ static int checkHaveCharRepeat(char *buffer, int len)
 
     //for check data is valid
     prevTemp = buffer[0];
-    for (int i = 1; i < len; i++)
+    for (int i = 1; i < len; i += 3)
     {
         if (prevTemp == buffer[i])
         {
             filterCount++;
         }
 
-        if (filterCount > len / 4)
+        if (filterCount > len / 8)
         {
-            // ESP_LOGE(TAG, "check  raw data, have repeat data!!!");
+            //ESP_LOGE(TAG, "check  raw data, have repeat data!!!");
             return -1;
         }
         prevTemp = buffer[i];
@@ -205,29 +201,33 @@ static void fft_music_task(void *params)
                 dsps_fft2r_fc32(y_cf, N_SAMPLES);
                 // Bit reverse
                 dsps_bit_rev_fc32(y_cf, N_SAMPLES);
-                // Convert one complex vector to two complex vectors
-                // dsps_cplx2reC_fc32(y_cf, N_SAMPLES);
 
                 for (int i = 0; i < N_SAMPLES / 2; i++)
                 {
-                    sum_y[i] = (float)(sqrt(y1_cf[i * 2 + 0] * y1_cf[i * 2 + 0] + y1_cf[i * 2 + 1] * y1_cf[i * 2 + 1]) / N_SAMPLES);
+                    sum_y[i] = (float)(sqrt(y_cf[i * 2 + 0] * y_cf[i * 2 + 0] + y_cf[i * 2 + 1] * y_cf[i * 2 + 1]) / N_SAMPLES);
                 }
 
                 //Release semaphore
                 haveDataUpdated = 0;
+                updateLedPeriodCount++;
 
-                if (++updateLedPeriodCount == LED_UPDATE_PERIOD)
-                {
-                    updateLedPeriodCount = 0;
-                    fft_update_data();
-                    // printMaxMinmun(&sum_y[4], N_SAMPLES / 2 - 4);
-                }
+                // ESP_LOGE(TAG, "%s: calcuate fft completed", __func__);
 
                 xSemaphoreGive(xSemaphore);
             }
+            else
+            {
+                if (updateLedPeriodCount > LED_UPDATE_PERIOD)
+                {
+                    updateLedPeriodCount = 0;
+                    fft_update_data();
+                    // ESP_LOGE(TAG, "%s: prepare led display", __func__);
+                    printMaxMinmun(&sum_y[4], N_SAMPLES / 2 - 4);
+                }
+            }
         }
 
-        vTaskDelay(FFT_TASK_PEROID / portTICK_PERIOD_MS);
+        vTaskDelay(FFT_TASK_DELAY / portTICK_PERIOD_MS);
     }
 
     vTaskDelete(NULL);
@@ -262,8 +262,6 @@ void fft_music_init()
 {
     ESP_LOGE(TAG, "fft_music_init:  Enter");
 
-    dsps_wind_hann_f32(wind, N_SAMPLES);
-
     //semaphore created for sync audio buffer.
     xSemaphore = xSemaphoreCreateMutex();
     if (xSemaphore != NULL)
@@ -285,30 +283,42 @@ void fft_music_push(char *buffer, int len)
     int i;
     short temp_left = 0;
     short temp_right = 0;
+    static int samplePeriod = 0;
+    float *y_cf_addr = NULL;
 
-    if (len / 4 != N_SAMPLES)
+    if (len != 2048)
     {
+        samplePeriod = 0;
         return;
     }
 
     if (checkHaveCharRepeat(buffer, len) != 0)
     {
+        samplePeriod = 0;
         return;
     }
 
-    if (xSemaphore && (pdTRUE == xSemaphoreTake(xSemaphore, 0)))
+    if (xSemaphore)
     {
-        int minLen = N_SAMPLES >= ((len / 4)) ? (len / 4) : (N_SAMPLES);
-        for (i = 0; i < minLen; i++)
+        if (haveDataUpdated == 0 && (pdTRUE == xSemaphoreTake(xSemaphore, 0)))
         {
-            temp_left = (short)(buffer[i * 4 + 1] << 8 | buffer[i * 4 + 0]);
-            temp_right = (short)(buffer[i * 4 + 3] << 8 | buffer[i * 4 + 2]);
-            y_cf[i * 2] = ((float)((temp_left + temp_right) / 32768.0f)) / 2.0f;
-            //y_cf[i * 2] *= wind[i];
-            y_cf[i * 2 + 1] = 0;
-        }
+            y_cf_addr = (float *)(&y_cf[samplePeriod * (N_SAMPLES / 2)]);
+            for (i = 0; i < N_SAMPLES / 4; i++)
+            {
+                temp_left = (short)(buffer[i * 4 + 1] << 8 | buffer[i * 4 + 0]);
+                temp_right = (short)(buffer[i * 4 + 3] << 8 | buffer[i * 4 + 2]);
+                y_cf_addr[i * 2] = ((float)((temp_left + temp_right) / 32768.0f)) / 2.0f;
+                y_cf_addr[i * 2 + 1] = 0;
+            }
 
-        haveDataUpdated = 1;
-        xSemaphoreGive(xSemaphore);
+            // total raw data is N_SAMPLES
+            if (++samplePeriod == 4)
+            {
+                haveDataUpdated = 1;
+                samplePeriod = 0;
+            }
+
+            xSemaphoreGive(xSemaphore);
+        }
     }
 }
