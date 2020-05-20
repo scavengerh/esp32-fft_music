@@ -31,7 +31,7 @@ esp_periph_handle_t handle_matrix = NULL;
 #define LED_NUM (LED_HIGH_LEVEL * 8)
 
 //display freq index: 31.5, 45, 63, 90, 125, 180, 250, 360, 550, 680, 890, 1k, 2k, 4k, 8k, 16k
-int16_t freq_offset[16] = {1, 2, 3, 4, 5, 8, 11, 17, 25, 30, 41, 44, 87, 175, 711, 0};
+int16_t freq_offset[16] = {0, 1, 2, 3, 4, 5, 8, 11, 17, 25, 30, 41, 44, 87, 175, 711};
 
 unsigned char led_data[LED_HIGH_LEVEL];
 
@@ -46,10 +46,11 @@ unsigned char led_updateCount[LED_HIGH_LEVEL];
 #define FFT_TASK_DELAY (10) //Ms
 
 //display review period: FFT_TASK_DELAY * LED_UPDATE_PERIOD
-#define LED_UPDATE_PERIOD (3) //Ms
+#define LED_UPDATE_PERIOD (2) //Ms
 
-#define THREAD_HIGH (0.1f)
-#define THREAD_LOW (0.005f)
+#define THRESHOLD_HIGH (0.1f)
+#define THRESHOLD_LOW (0.00001f)
+static float factor = 0.0f;
 
 SemaphoreHandle_t xSemaphore = NULL;
 int haveDataUpdated = 0;
@@ -80,25 +81,19 @@ static void fft_update_led(unsigned char display[], int size)
 static void fft_update_data(void)
 {
     int i = 0;
-    unsigned char tempdata;
-    float distance = THREAD_HIGH - THREAD_LOW;
-    float factor = 256.0 / distance;
     float tempraw = 0.0f;
+    unsigned char tempdata;
 
     for (i = 0; i < LED_HIGH_LEVEL; i++)
     {
         tempraw = sum_y[freq_offset[i]];
-        if (freq_offset[i] == 0)
-        {
-            tempraw /= 2.0f;
-        }
 
-        if (tempraw < THREAD_LOW)
-            tempraw = THREAD_LOW;
-        if (tempraw > THREAD_HIGH)
-            tempraw = THREAD_HIGH;
+        if (tempraw < THRESHOLD_LOW)
+            tempraw = THRESHOLD_LOW;
+        if (tempraw > THRESHOLD_HIGH)
+            tempraw = THRESHOLD_HIGH;
 
-        tempdata = (unsigned char)(factor * (tempraw - THREAD_LOW));
+        tempdata = (unsigned char)(factor * (tempraw - THRESHOLD_LOW));
 
         if (tempdata > led_data[i])
         {
@@ -122,7 +117,7 @@ static void fft_update_data(void)
         }
     }
 
-#if 1 //send to ws2812 matrix for display
+#if  0 //send to ws2812 matrix for display
     fft_update_led(led_data, LED_HIGH_LEVEL);
 #else //for test use disp_view
     for (i = 0; i < LED_HIGH_LEVEL; i++)
@@ -137,6 +132,7 @@ static int checkHaveCharRepeat(char *buffer, int len)
 {
     char prevTemp = 0.0;
     int filterCount = 0;
+    int thresholdCount = len/16;
 
     //for check data is valid
     prevTemp = buffer[0];
@@ -147,7 +143,7 @@ static int checkHaveCharRepeat(char *buffer, int len)
             filterCount++;
         }
 
-        if (filterCount > len / 8)
+        if (filterCount >thresholdCount)
         {
             //ESP_LOGE(TAG, "check  raw data, have repeat data!!!");
             return -1;
@@ -222,7 +218,7 @@ static void fft_music_task(void *params)
                     updateLedPeriodCount = 0;
                     fft_update_data();
                     // ESP_LOGE(TAG, "%s: prepare led display", __func__);
-                    printMaxMinmun(&sum_y[4], N_SAMPLES / 2 - 4);
+                    // printMaxMinmun(&sum_y[4], N_SAMPLES / 2 - 4);
                 }
             }
         }
@@ -276,6 +272,8 @@ void fft_music_init()
     {
         led_data[i] = 0;
     }
+
+    factor = 256.0f / (THRESHOLD_HIGH - THRESHOLD_LOW);
 }
 
 void fft_music_push(char *buffer, int len)
