@@ -14,7 +14,13 @@
 
 static const char *TAG = "FFT_MUSIC";
 
-#define N_SAMPLES 2048
+
+#define LED_HIGH_LEVEL 16
+#define LED_NUM (LED_HIGH_LEVEL * 8)
+
+#define N_SAMPLES 512
+#define N_FFT_SIZE 16 //(N_SAMPLES / 4 / LED_HIGH_LEVEL)
+
 //input audio raw data
 float y_cf[N_SAMPLES * 2];
 //output fft data
@@ -24,58 +30,139 @@ float sum_y[N_SAMPLES / 2];
 periph_ws2812_ctrl_cfg_t *control_cfg = NULL;
 esp_periph_handle_t handle_matrix = NULL;
 
-#define GPIO_LEFT_NUMBER 12
-#define GPIO_RIGHT_NUMBER 14
-
-#define LED_HIGH_LEVEL 16
-#define LED_NUM (LED_HIGH_LEVEL * 8)
+#define GPIO_Pin_NUM 14
 
 //display freq index: 31.5, 45, 63, 90, 125, 180, 250, 360, 550, 680, 890, 1k, 2k, 4k, 8k, 16k
-int16_t freq_offset[16] = {0, 1, 2, 3, 4, 5, 8, 11, 17, 25, 30, 41, 44, 87, 175, 711};
+int16_t freq_offset[17] = {0, 1, 2, 3, 4, 5, 8, 11, 17, 25, 30, 41, 44, 80, 160, 200, 255};
 
 unsigned char led_data[LED_HIGH_LEVEL];
 
-//for view test result
-float led_data_view[LED_HIGH_LEVEL];
 
 //update flow count
 unsigned char led_updateCount[LED_HIGH_LEVEL];
 #define SLOW_SPEED (2)
 
-//Task period
-#define FFT_TASK_DELAY (10) //Ms
 
 //display review period: FFT_TASK_DELAY * LED_UPDATE_PERIOD
 #define LED_UPDATE_PERIOD (2) //Ms
 
 #define THRESHOLD_HIGH (0.1f)
-#define THRESHOLD_LOW (0.00001f)
+#define THRESHOLD_LOW (0.0005f)
 static float factor = 0.0f;
 
 SemaphoreHandle_t xSemaphore = NULL;
 int haveDataUpdated = 0;
 int isCleanMatrixLed = 0;
 
+uint8_t R_Color = 0;
+uint8_t B_Color = 0;
+uint8_t G_Color = 0;
+uint32_t Temp_Color = 0;
+float RGB_max;
+float RGB_min;
+float RGB_Adj; 
+int difs;
+
+// 其中的H、S、V分别代表色调（H）、饱和度（S）和明度（V）
+uint32_t HSVtoRGB(uint16_t hh, uint16_t ss, uint16_t vv)      
+{
+    int i;
+    uint16_t h = hh;
+    uint16_t v = vv;
+    uint16_t s = ss;
+    if(h >= 360) h = 360;
+    if(s >= 100) s = 100;
+    if(v >= 100) v = 100;
+
+    i = h / 60;
+    difs = h % 60; 
+    RGB_max = v * 2.55f;
+    RGB_min = RGB_max * (100 - s) / 100.0f;
+    RGB_Adj = (RGB_max - RGB_min) * difs / 60.0f; 
+    switch(i)
+    {
+    case 0:
+        R_Color = RGB_max;
+        G_Color = RGB_min + RGB_Adj;
+        B_Color = RGB_min;
+        break;
+
+    case 1:
+        R_Color = RGB_max - RGB_Adj;
+        G_Color = RGB_max;
+        B_Color = RGB_min;
+        break;
+
+    case 2:
+        R_Color = RGB_min;
+        G_Color = RGB_max;
+        B_Color = RGB_min + RGB_Adj;
+        break;
+
+    case 3:
+        R_Color = RGB_min;
+        G_Color = RGB_max - RGB_Adj;
+        B_Color = RGB_max;
+        break;
+
+    case 4:
+        R_Color = RGB_min + RGB_Adj;
+        G_Color = RGB_min;
+        B_Color = RGB_max;
+        break;
+
+    default:
+        R_Color = RGB_max;
+        G_Color = RGB_min;
+        B_Color = RGB_max - RGB_Adj;
+        break;
+    }
+    Temp_Color = ((uint32_t)R_Color << 8) | ((uint32_t)G_Color << 16) | ((uint32_t)B_Color << 0);
+    return Temp_Color;
+}
+
+
 static void fft_update_led(unsigned char display[], int size)
 {
+    static int color_counter = 0;
+    ++color_counter;
+    uint32_t color_cur = HSVtoRGB(color_counter%360, color_counter%49 + 50, 65);
     if (size != LED_HIGH_LEVEL)
     {
-        return;
+       return;
     }
 
     if (handle_matrix != NULL)
     {
-        //for update right matrix
         for (int i = 0; i < LED_NUM; i++)
         {
-            control_cfg[i].color = (display[i / 8] > ((i % 8) * 32)) ? LED2812_COLOR_CYAN : LED2812_COLOR_BLACK;
-            control_cfg[i].mode = PERIPH_WS2812_ONE;
+            // control_cfg[i].color = (display[i / 8] > ((i % 8) * 32)) ? color_cur : LED2812_COLOR_BLACK;
+            control_cfg[i].color = ((display[i / 8]) > ((i % 8) * 32)) ? color_cur : LED2812_COLOR_BLACK;
             control_cfg[i].loop = 50;
-            control_cfg[i].time_off_ms = 100;
-            control_cfg[i].time_on_ms = 100;
+            if(control_cfg[i].color == LED2812_COLOR_BLACK){
+            control_cfg[i].mode = PERIPH_WS2812_ONE;
+                control_cfg[i].time_off_ms = 0;
+                control_cfg[i].time_on_ms = 0;
+            }else{
+            control_cfg[i].mode = PERIPH_WS2812_FADE;
+                control_cfg[i].time_off_ms = 100;
+                control_cfg[i].time_on_ms = 100;
+            }
         }
         periph_ws2812_control(handle_matrix, control_cfg, NULL);
     }
+}
+static float get_maximum(const float* start, int size){
+    float maxValue = 0.0f;
+    const float *ptr = start;
+    if(ptr){
+        for(int i = 0; i < size; i++, ptr++){
+            if(*ptr > maxValue){
+                maxValue = *ptr;
+            }
+        }
+    }
+    return maxValue;
 }
 
 static void fft_update_data(void)
@@ -83,10 +170,11 @@ static void fft_update_data(void)
     int i = 0;
     float tempraw = 0.0f;
     unsigned char tempdata;
-
+    int fft_step = (N_SAMPLES/2) / LED_HIGH_LEVEL;
     for (i = 0; i < LED_HIGH_LEVEL; i++)
     {
-        tempraw = sum_y[freq_offset[i]];
+        tempraw = get_maximum(&sum_y[freq_offset[i]], freq_offset[i + 1] - freq_offset[i]);
+        // tempraw = get_maximum(&sum_y[i * fft_step], fft_step);
 
         if (tempraw < THRESHOLD_LOW)
             tempraw = THRESHOLD_LOW;
@@ -117,15 +205,8 @@ static void fft_update_data(void)
         }
     }
 
-#if  0 //send to ws2812 matrix for display
     fft_update_led(led_data, LED_HIGH_LEVEL);
-#else //for test use disp_view
-    for (i = 0; i < LED_HIGH_LEVEL; i++)
-    {
-        led_data_view[i] = (float)led_data[i];
-    }
-    dsps_view(led_data_view, LED_HIGH_LEVEL, 16, 8, 0.0f, 255.0f, '|');
-#endif
+
 }
 
 static int checkHaveCharRepeat(char *buffer, int len)
@@ -152,26 +233,6 @@ static int checkHaveCharRepeat(char *buffer, int len)
     }
 
     return 0;
-}
-
-static void printMaxMinmun(float buffer[], int len)
-{
-    float maxmum, minmum;
-    maxmum = buffer[0];
-    minmum = buffer[0];
-
-    for (int i = 1; i < len; i++)
-    {
-        if (buffer[i] > maxmum)
-        {
-            maxmum = buffer[i];
-        }
-        if (buffer[i] < minmum)
-        {
-            minmum = buffer[i];
-        }
-    }
-    ESP_LOGE(TAG, "max: %f, min:%f", maxmum, minmum);
 }
 
 static void fft_music_task(void *params)
@@ -207,8 +268,6 @@ static void fft_music_task(void *params)
                 haveDataUpdated = 0;
                 updateLedPeriodCount++;
 
-                // ESP_LOGE(TAG, "%s: calcuate fft completed", __func__);
-
                 xSemaphoreGive(xSemaphore);
             }
             else
@@ -217,13 +276,11 @@ static void fft_music_task(void *params)
                 {
                     updateLedPeriodCount = 0;
                     fft_update_data();
-                    // ESP_LOGE(TAG, "%s: prepare led display", __func__);
-                    // printMaxMinmun(&sum_y[4], N_SAMPLES / 2 - 4);
                 }
             }
         }
 
-        vTaskDelay(FFT_TASK_DELAY / portTICK_PERIOD_MS);
+        vTaskDelay(pdMS_TO_TICKS(LED_UPDATE_PERIOD*4));  //delay 2 ms
     }
 
     vTaskDelete(NULL);
@@ -232,7 +289,7 @@ static void fft_music_task(void *params)
 void fft_periph_init(esp_periph_set_handle_t set)
 {
     periph_ws2812_cfg_t cfg = {
-        .gpio_num = GPIO_LEFT_NUMBER,
+        .gpio_num = GPIO_Pin_NUM,
         .led_num = LED_NUM,
     };
 
@@ -272,49 +329,32 @@ void fft_music_init()
     {
         led_data[i] = 0;
     }
-
     factor = 256.0f / (THRESHOLD_HIGH - THRESHOLD_LOW);
 }
 
 void fft_music_push(char *buffer, int len)
 {
-    int i;
     short temp_left = 0;
     short temp_right = 0;
     static int samplePeriod = 0;
-    float *y_cf_addr = NULL;
 
-    if (len != 2048)
-    {
-        samplePeriod = 0;
+    if(len < 2048){
         return;
     }
 
-    if (checkHaveCharRepeat(buffer, len) != 0)
-    {
-        samplePeriod = 0;
-        return;
-    }
 
     if (xSemaphore)
     {
         if (haveDataUpdated == 0 && (pdTRUE == xSemaphoreTake(xSemaphore, 0)))
         {
-            y_cf_addr = (float *)(&y_cf[samplePeriod * (N_SAMPLES / 2)]);
-            for (i = 0; i < N_SAMPLES / 4; i++)
+            for (int i = 0; i < N_SAMPLES; i++)
             {
                 temp_left = (short)(buffer[i * 4 + 1] << 8 | buffer[i * 4 + 0]);
                 temp_right = (short)(buffer[i * 4 + 3] << 8 | buffer[i * 4 + 2]);
-                y_cf_addr[i * 2] = ((float)((temp_left + temp_right) / 32768.0f)) / 2.0f;
-                y_cf_addr[i * 2 + 1] = 0;
+                y_cf[i * 2] = ((float)((temp_left + temp_right) / 32768.0f)) / 2.0f;
+                y_cf[i * 2 + 1] = 0;
             }
-
-            // total raw data is N_SAMPLES
-            if (++samplePeriod == 4)
-            {
-                haveDataUpdated = 1;
-                samplePeriod = 0;
-            }
+            haveDataUpdated = 1;
 
             xSemaphoreGive(xSemaphore);
         }
