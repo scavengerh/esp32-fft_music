@@ -270,17 +270,15 @@ static void fft_music_task(void *params)
 
                 xSemaphoreGive(xSemaphore);
             }
-            else
+            
+            if(updateLedPeriodCount)
             {
-                if (updateLedPeriodCount > LED_UPDATE_PERIOD)
-                {
-                    updateLedPeriodCount = 0;
-                    fft_update_data();
-                }
+                updateLedPeriodCount = 0;
+                fft_update_data();
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(LED_UPDATE_PERIOD*4));  //delay 2 ms
+        vTaskDelay(pdMS_TO_TICKS(LED_UPDATE_PERIOD*6));  //delay 2 ms
     }
 
     vTaskDelete(NULL);
