@@ -26,6 +26,7 @@
 #include "board.h"
 #include "a2dp_stream.h"
 #include "fft_music.h"
+#include "audio_thread.h"
 
 static const char *TAG = "BLUETOOTH_EXAMPLE";
 static esp_periph_handle_t bt_periph = NULL;
@@ -71,6 +72,25 @@ static esp_err_t input_key_service_cb(periph_service_handle_t handle, periph_ser
     return ESP_OK;
 }
 
+void lyricUpdateMeta() {
+  uint8_t attr_mask = ESP_AVRC_MD_ATTR_TITLE | ESP_AVRC_MD_ATTR_ARTIST | ESP_AVRC_MD_ATTR_ALBUM ;
+  esp_avrc_ct_send_metadata_cmd(1, attr_mask);
+}
+
+void* taskHandle(void* data)
+{
+    //1000ms period
+    const TickType_t x_Delay = 1000 / portTICK_PERIOD_MS;
+    for(;;){
+        vTaskDelay(x_Delay);
+        lyricUpdateMeta();
+    }
+
+    return NULL;
+}
+
+xTaskHandle play_taskHandle = NULL;
+
 void app_main(void)
 {
     audio_pipeline_handle_t pipeline;
@@ -95,7 +115,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
 
-    esp_bt_dev_set_device_name("BT_SINK_STREAM");
+    esp_bt_dev_set_device_name("ESP_SINK_STREAM_DEMO");
 
 #if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 0, 0))
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
@@ -183,12 +203,16 @@ void app_main(void)
     ESP_LOGI(TAG, "[ 9 ] Listen for all pipeline events");
     while (1) {
         audio_event_iface_msg_t msg;
+
         esp_err_t ret = audio_event_iface_listen(evt, &msg, portMAX_DELAY);
+
+        ESP_LOGI(TAG, "[ * ] audio_event_iface_listen : %d", ret);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "[ * ] Event interface error : %d", ret);
             continue;
         }
 
+        ESP_LOGI(TAG, "[ * ] msg.source_type : %d", msg.source_type);
         if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT && msg.source == (void *) bt_stream_reader
             && msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
             audio_element_info_t music_info = {0};
@@ -202,6 +226,10 @@ void app_main(void)
 #else
             i2s_stream_set_clk(i2s_stream_writer, music_info.sample_rates, music_info.bits, music_info.channels);
 #endif
+            if(play_taskHandle == NULL){
+                audio_thread_create(&play_taskHandle, "play_lyric", (void *)taskHandle, NULL, 1024,
+                    1, true, 0);
+            }
             continue;
         }
 
